@@ -368,7 +368,18 @@ and emit_global_vars env p es =
     | _ ->
       emit_nyi "global expression"
   in
-  Emit_pos.emit_pos_then p @@ gather (List.map es emit_global_var)
+  (* Deduplicate global variable declarations *)
+  let _, instrs = List.fold es ~init:([], [])
+    ~f:begin fun (seen, instrs)  e ->
+      match snd e with
+      | A.Id (_, name) when List.mem seen name ->
+        seen, instrs
+      | A.Id (_, name) ->
+        name::seen, (emit_global_var e)::instrs
+      | _ ->
+        seen, (emit_global_var e)::instrs
+      end in
+  Emit_pos.emit_pos_then p @@ gather (List.rev instrs)
 
 and emit_static_var es =
   let emit_static_var_single e =
@@ -430,7 +441,10 @@ and emit_using env pos is_block_scoped has_await e b =
     let local, preamble = match snd e with
       | A.Binop (A.Eq None, (_, A.Lvar (_, id)), _)
       | A.Lvar (_, id) ->
-        Local.Named id, emit_ignored_expr env e
+        Local.Named id, gather [
+          emit_expr_and_unbox_if_necessary ~need_ref:false env e;
+          instr_popc;
+        ]
       | _ ->
         let l = Local.get_unnamed_local () in
         l, gather [emit_expr ~need_ref:false env e; instr_setl l; instr_popc]
@@ -548,11 +562,7 @@ and emit_for env p e1 e2 e3 b =
 
 and emit_switch env scrutinee_expr cl =
   if List.is_empty cl
-  then
-    gather [
-      emit_expr ~need_ref:false env scrutinee_expr;
-      instr_popc
-    ]
+  then emit_ignored_expr env scrutinee_expr
   else
   stash_in_local env scrutinee_expr
   begin fun local break_label ->
@@ -874,7 +884,7 @@ and emit_iterator_key_value_storage env iterator =
       let value_local = Local.get_unnamed_local () in
       let value_preamble, value_load =
         emit_iterator_lvalue_storage env expr_v value_local in
-      None, value_local, value_preamble, value_load
+      None, value_local, [], value_preamble @ value_load
     end
 
 (* Emit code for either the key or value l-value operation in foreach await.
@@ -1063,7 +1073,7 @@ and emit_foreach_ env pos collection iterator block =
     Emit_env.do_in_loop_body loop_break_label loop_continue_label env
       ~iter:(mutable_iter, iterator_number) block emit_stmt in
   let result = gather [
-    emit_expr ~need_ref:mutable_iter env collection;
+    emit_expr_and_unbox_if_necessary ~need_ref:mutable_iter env collection;
     Emit_pos.emit_pos pos;
     init;
     instr_try_fault

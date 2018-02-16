@@ -742,6 +742,36 @@ and emit_is env pos lhs h =
             instr_label its_done
           ]
       end
+    | A.Htuple hl ->
+      begin match lhs with
+        | IsExprExpr e -> emit_is_create_local env pos e h
+        | IsExprUnnamedLocal local ->
+          let its_true = Label.next_regular () in
+          let its_done = Label.next_regular () in
+          let skip_label = Label.next_regular () in
+          gather [
+            instr_istypel local OpVArray;
+            instr_jmpz skip_label;
+
+            instr_int (List.length hl);
+            instr_fpushfuncd 1 (Hhbc_id.Function.from_raw_string "count");
+            instr_fpassl 0 local H.Cell;
+            instr_fcall 1;
+            instr_unboxr_nop;
+            instr (IOp Same);
+            instr_jmpz skip_label;
+
+            gather (List.mapi ~f:(emit_is_tuple_elem env pos local skip_label) hl);
+            instr_jmp its_true;
+
+            instr_label skip_label;
+            instr_false;
+            instr_jmp its_done;
+            instr_label its_true;
+            instr_true;
+            instr_label its_done
+          ]
+      end
     | _ -> emit_nyi "is expression: unsupported hint (T22779957)"
 
 and emit_is_create_local env pos e h =
@@ -750,13 +780,25 @@ and emit_is_create_local env pos e h =
     gather [
       emit_expr ~need_ref:false env e;
       instr_popl local;
-      emit_is env pos (IsExprUnnamedLocal local) h
+      emit_is env pos (IsExprUnnamedLocal local) h;
+      instr_unsetl local;
     ]
 
 and emit_is_lhs env lhs =
   match lhs with
     | IsExprExpr e -> emit_expr ~need_ref:false env e
     | IsExprUnnamedLocal local -> instr_cgetl local
+
+and emit_is_tuple_elem env pos local skip_label i h =
+  let local_i = Local.get_unnamed_local () in
+  gather [
+    instr_basel local MemberOpMode.Warn;
+    instr_querym 0 H.QueryOp.CGet (MemberKey.EI (Int64.of_int i));
+    instr_popl local_i;
+    emit_is env pos (IsExprUnnamedLocal local_i) h;
+    instr_unsetl local_i;
+    instr_jmpz skip_label;
+  ]
 
 and emit_null_coalesce env e1 e2 =
   let end_label = Label.next_regular () in
@@ -1217,7 +1259,7 @@ and emit_call_isset_expr env outer_pos (pos, expr_ as expr) =
     ]
   | _ ->
     gather [
-      emit_expr ~need_ref:false env expr;
+      emit_expr_and_unbox_if_necessary ~need_ref:false env expr;
       instr_istypec OpNull;
       instr_not
     ]
@@ -1249,7 +1291,7 @@ and emit_call_empty_expr env (pos, expr_ as expr) =
     ]
   | _ ->
     gather [
-      emit_expr ~need_ref:false env expr;
+      emit_expr_and_unbox_if_necessary ~need_ref:false env expr;
       instr_not
     ]
 
@@ -1592,9 +1634,11 @@ and emit_callconv _env kind _e =
     failwith "emit_callconv: This should have been caught at emit_arg"
 
 and emit_inline_hhas s =
-  let lexer = Lexing.from_string s in
+  let lexer = Lexing.from_string (s ^ "\n") in
   try
-    let instrs = Hhas_parser.functionbody Hhas_lexer.read lexer in
+    let asm = Hhas_parser.functionbodywithdirectives Hhas_lexer.read lexer in
+    let instrs =
+      Label_rewriter.clone_with_fresh_regular_labels @@ Hhas_asm.instrs asm in
     (* TODO: handle case when code after inline hhas is unreachable
       i.e. fallthrough return should not be emitted *)
     match get_estimated_stack_depth instrs with
@@ -1605,7 +1649,8 @@ and emit_inline_hhas s =
         "Inline assembly expressions should leave the stack unchanged, \
         or push exactly one cell onto the stack."
   with Parsing.Parse_error ->
-    Emit_fatal.raise_fatal_parse Pos.none "error parsing inline hhas"
+    Emit_fatal.raise_fatal_parse Pos.none @@
+      "Error parsing inline hhas:\n" ^ s
 
 and emit_expr env (pos, expr_ as expr) ~need_ref =
   Emit_pos.emit_pos_then pos @@
@@ -2025,7 +2070,7 @@ and emit_jmpz_aux env (pos, expr_ as expr) label =
       ]
     | _ ->
       gather [
-        emit_expr ~need_ref:false env expr;
+        emit_expr_and_unbox_if_necessary ~need_ref:false env expr;
         instr_jmpz label
       ]
     end
@@ -2075,7 +2120,7 @@ and emit_jmpnz env (pos, expr_ as expr) label =
       ]
     | _ ->
       gather [
-        emit_expr ~need_ref:false env expr;
+        emit_expr_and_unbox_if_necessary ~need_ref:false env expr;
         instr_jmpnz label
       ]
 
@@ -2739,10 +2784,8 @@ and emit_base_worker ~is_object ~notice ~inout_param_info env mode base_offset
        1
 
 and get_pass_by_ref_hint expr =
-  let with_ref = expr_starts_with_ref expr in
-  if Emit_env.is_hh_syntax_enabled ()
-  then if with_ref then Ref else Cell
-  else Any
+  if Emit_env.is_systemlib () || not (Emit_env.is_hh_syntax_enabled ())
+  then Any else (if expr_starts_with_ref expr then Ref else Cell)
 
 and strip_ref e =
   match snd e with
@@ -3506,12 +3549,17 @@ and binary_assignment_rhs_starts_with_ref = function
   | _ -> false
 
 and emit_expr_and_unbox_if_necessary ~need_ref env e =
-  let unboxing_instr =
-    if binary_assignment_rhs_starts_with_ref e
-    then instr_unbox
-    else empty
-  in
-  gather [emit_expr ~need_ref env e; unboxing_instr]
+  let need_unboxing =
+    match e with
+    | _, A.Expr_list es ->
+      Core_list.last es
+      |> Option.value_map ~default:false ~f:binary_assignment_rhs_starts_with_ref
+    | e ->
+      binary_assignment_rhs_starts_with_ref e in
+  gather [
+    emit_expr ~need_ref env e;
+    if need_unboxing then instr_unbox else empty;
+  ]
 
 (* Emit code for an l-value operation *)
 and emit_lval_op env pos op expr1 opt_expr2 =
@@ -3802,7 +3850,7 @@ and emit_unop ~need_ref env pos op e =
       ]
 
 and emit_exprs env exprs =
-  gather (List.map exprs (emit_expr ~need_ref:false env))
+  gather (List.map exprs (emit_expr_and_unbox_if_necessary ~need_ref:false env))
 
 (* allows to create a block of code that will
 - get a fresh temporary local
@@ -3856,7 +3904,8 @@ and stash_in_local_with_prefix ?(always_stash=false) ?(leave_on_stack=false)
     ]
   | _ ->
     let generate_value =
-      Local.scope @@ fun () -> emit_expr ~need_ref:false env e in
+      Local.scope @@ fun () ->
+        emit_expr_and_unbox_if_necessary ~need_ref:false env e in
     Local.scope @@ fun () ->
       let temp = Local.get_unnamed_local () in
       let prefix_instr, result_instr =

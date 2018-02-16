@@ -473,7 +473,7 @@ struct RuntimeOption {
   F(bool, JitEvaledCode,               true)                            \
   F(bool, JitRequireWriteLease,        false)                           \
   F(uint64_t, JitRelocationSize,       kJitRelocationSizeDefault)       \
-  F(uint64_t, JitMatureSize,           25 << 20)                        \
+  F(uint64_t, JitMatureSize,           125 << 20)                       \
   F(bool, JitMatureAfterWarmup,        true)                            \
   F(double, JitMaturityExponent,       1.)                              \
   F(bool, JitTimer,                    kJitTimerDefault)                \
@@ -500,6 +500,8 @@ struct RuntimeOption {
   /* The number of times to reuse a single hh_single_compile daemons
      before forcing a restart */                                        \
   F(uint32_t, HackCompilerReset,       10)                              \
+  /* Whether to use an extern compiler to build systemlib */            \
+  F(bool, UseExternCompilerForSystemLib, false)                         \
   /* Whether or not to fallback to hphpc if hh_single_compile fails for
      any reason. */                                                     \
   F(bool, HackCompilerFallback,        false)                           \
@@ -672,7 +674,8 @@ struct RuntimeOption {
   F(bool, RegionRelaxGuards,           true)                            \
   /* DumpBytecode =1 dumps user php, =2 dumps systemlib & user php */   \
   F(int32_t, DumpBytecode,             0)                               \
-  F(bool, DumpHhas,                    false)                           \
+  /* DumpHhas =1 dumps user php, =2 dumps systemlib & user php */       \
+  F(int32_t, DumpHhas,                 0)                               \
   F(bool, DisableHphpcOpts,            false)                           \
   F(bool, DisableErrorHandler,         false)                           \
   F(bool, DumpTC,                      false)                           \

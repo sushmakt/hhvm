@@ -188,7 +188,7 @@ let make_genv options config local_config handle =
 let default_genv =
   { options          = ServerArgs.default_options "";
     config           = ServerConfig.default_config;
-    local_config     = ServerLocalConfig.default;
+    local_config     = ServerLocalConfig.({ default with incremental_errors = true});
     debug_port       = None;
     workers          = None;
     indexer          = (fun _ -> fun () -> []);
@@ -216,6 +216,14 @@ let make_env config =
     needs_phase2_redecl = Relative_path.Set.empty;
     needs_recheck = Relative_path.Set.empty;
     needs_full_check = false;
+    init_env = {
+      needs_full_init = false;
+      init_start_t = Unix.gettimeofday ();
+      state_distance = None;
+      init_error = None;
+      approach_name = "";
+      init_type = "";
+    };
     diag_subscribe = None;
     recent_recheck_loop_stats = empty_recheck_loop_stats;
   }

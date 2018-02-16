@@ -226,6 +226,8 @@ let rec dispatch_loop handlers =
     let header = json_of_string line in
     let file = get_field_opt (get_string "file") header in
     let bytes = get_field (get_number_int "bytes") (fun _af -> 0) header in
+    let is_systemlib = get_field_opt (get_bool "is_systemlib") header in
+    Emit_env.set_is_systemlib @@ Option.value ~default:false is_systemlib;
     let body = Bytes.create bytes in begin
     try
       really_input stdin body 0 bytes;
@@ -265,11 +267,12 @@ let parse_text compiler_options popt fn text =
       Hhbc_options.enable_hiphop_syntax !Hhbc_options.compiler_options in
     let php5_compat_mode =
       not (Hhbc_options.enable_uniform_variable_syntax !Hhbc_options.compiler_options) in
+    let systemlib_compat_mode = Emit_env.is_systemlib () in
     let env = Full_fidelity_ast.make_env
       ~parser_options:popt
       ~ignore_pos
-      ~hhvm_compat_mode:true
       ~codegen:true
+      ~systemlib_compat_mode
       ~php5_compat_mode
       ~enable_hh_syntax
       fn

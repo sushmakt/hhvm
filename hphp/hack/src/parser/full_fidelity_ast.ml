@@ -36,9 +36,9 @@ let drop_pstr : int -> pstring -> pstring = fun cnt (pos, str) ->
 
 (* Context of the file being parsed, as (hopefully some day read-only) state. *)
 type env =
-  { hhvm_compat_mode         : bool
-  ; is_hh_file               : bool
+  { is_hh_file               : bool
   ; codegen                  : bool
+  ; systemlib_compat_mode    : bool
   ; php5_compat_mode         : bool
   ; elaborate_namespaces     : bool
   ; include_line_comments    : bool
@@ -94,7 +94,7 @@ let pFunction node env =
   match syntax node with
   | FunctionDeclaration  { function_declaration_header = h; _ }
   | MethodishDeclaration { methodish_function_decl_header = h; _ }
-    when env.hhvm_compat_mode ->
+    when env.codegen ->
     begin match syntax h with
     | FunctionDeclarationHeader { function_keyword = f; _ }
       when not (is_missing f) ->
@@ -1214,8 +1214,8 @@ and pExpr ?location:(location=TopLevel) : expr parser = fun node env ->
         if s <> String.lowercase_ascii s then Lint.lowercase_constant pos s;
         (match location, token_kind expr with
         (* TODO(T21285960): Inside strings, int indices "should" be string indices *)
-        | InDoubleQuotedString, _ when env.hhvm_compat_mode -> String (pos, mkStr unesc_dbl s)
-        | InBacktickedString, _ when env.hhvm_compat_mode -> String (pos, mkStr Php_escaping.unescape_backtick s)
+        | InDoubleQuotedString, _ when env.codegen -> String (pos, mkStr unesc_dbl s)
+        | InBacktickedString, _ when env.codegen -> String (pos, mkStr Php_escaping.unescape_backtick s)
         | _, Some TK.DecimalLiteral
         | _, Some TK.OctalLiteral
         | _, Some TK.HexadecimalLiteral
@@ -1366,7 +1366,7 @@ and pExpr ?location:(location=TopLevel) : expr parser = fun node env ->
           let name = pos_name xhp_simple_attribute_name env in
           let expr =
             if is_braced_expression xhp_simple_attribute_expression
-            && env.fi_mode = FileInfo.Mdecl && not env.hhvm_compat_mode
+            && env.fi_mode = FileInfo.Mdecl && not env.codegen
             then Pos.none, Null
             else pEmbedded unesc_xhp_attr xhp_simple_attribute_expression env
           in
@@ -1445,7 +1445,7 @@ and pFunctionBody : block parser = fun node env ->
   | CompoundStatement _ ->
     let block = pBlock node env in
     if not env.top_level_statements
-    && (  env.fi_mode = FileInfo.Mdecl && not env.hhvm_compat_mode
+    && (  env.fi_mode = FileInfo.Mdecl && not env.codegen
        || env.quick_mode)
     then [ Pos.none, Noop ]
     else block
@@ -1461,7 +1461,9 @@ and pStmt : stmt parser = fun node env ->
   extract_and_push_docblock node;
   let pos = pPos node env in
   let result = match syntax node with
-  | SwitchStatement { switch_expression; switch_sections; _ } ->
+  | SwitchStatement { switch_expression=expr; switch_sections=sections; _ }
+  | AlternateSwitchStatement { alternate_switch_expression=expr;
+    alternate_switch_sections=sections; _ } ->
     let pSwitchLabel : (block -> case) parser = fun node env cont ->
       match syntax node with
       | CaseLabel { case_expression; _ } ->
@@ -1493,8 +1495,8 @@ and pStmt : stmt parser = fun node env ->
     in
     pos,
     Switch
-    ( pExpr switch_expression env
-    , List.concat @@ couldMap ~f:pSwitchSection switch_sections env
+    ( pExpr expr env
+    , List.concat @@ couldMap ~f:pSwitchSection sections env
     )
   | IfStatement
     { if_condition; if_statement; if_elseif_clauses; if_else_clause; _ } ->
@@ -2020,7 +2022,7 @@ and pClassElt : class_elt list parser = fun node env ->
       let pBody = fun node env ->
         let body = pFunctionBody node env in
         let member_init =
-          if env.hhvm_compat_mode || env.codegen
+          if env.codegen
           then List.rev member_init
           else member_init
         in
@@ -2121,9 +2123,10 @@ and pClassElt : class_elt list parser = fun node env ->
         ; xhp_attribute_decl_required    = req
         } ->
           let (p, name) = pos_name name env in
+          let pos = if is_missing init then p else Pos.btw p (pPos init env) in
           XhpAttr
           ( mpOptional pHint ty env
-          , (Pos.none, (p, ":" ^ name), mpOptional pSimpleInitializer init env)
+          , (pos, (p, ":" ^ name), mpOptional pSimpleInitializer init env)
           , not (is_missing req)
           , match syntax ty with
             | XHPEnumType { xhp_enum_optional; xhp_enum_values; _ } ->
@@ -2274,7 +2277,7 @@ and pDef : def list parser = fun node env ->
           match ns with
           | [] -> acc
           | { syntax = PropertyDeclaration { property_modifiers; _ }; _ } :: _
-            when not env.codegen && not env.hhvm_compat_mode &&
+            when not env.codegen &&
               List.exists ~f:Syntax.is_var (as_list property_modifiers) ->
                 (* Break off remaining class body parse; legacy compliance *)
                 acc
@@ -2400,7 +2403,7 @@ and pDef : def list parser = fun node env ->
     { inclusion_expression
     ; inclusion_semicolon = _
     } when env.fi_mode <> FileInfo.Mdecl && env.fi_mode <> FileInfo.Mphp
-        || env.hhvm_compat_mode || env.codegen ->
+        || env.codegen ->
       let expr = pExpr inclusion_expression env in
       [ Stmt (pPos node env, Expr expr) ]
   | NamespaceDeclaration
@@ -2429,7 +2432,7 @@ and pDef : def list parser = fun node env ->
       let f = pNamespaceUseClause env kind ~prefix:None in
       [ NamespaceUse (List.map ~f (as_list clauses)) ]
   | _ when env.fi_mode = FileInfo.Mdecl || env.fi_mode = FileInfo.Mphp
-        && not (env.hhvm_compat_mode || env.codegen)-> []
+        && not env.codegen -> []
   | _ -> [ Stmt (pStmt node env) ]
 let pProgram : program parser = fun node env ->
   let rec post_process program =
@@ -2568,10 +2571,13 @@ let scour_comments
       | TriviaKind.AfterHaltCompiler
         -> acc
       | TriviaKind.DelimitedComment ->
+        (* For legacy compliance, block comments should have the position of
+         * their end
+         *)
         let start = Trivia.start_offset t + 2 (* for the '/*' *) in
-        let end_  = Trivia.end_offset t - 2 (* for the '*/' *) in
-        let len   = end_ - start + 1 in
-        let p = pos_of_offset start end_ in
+        let end_  = Trivia.end_offset t in
+        let len   = end_ - start - 1 in
+        let p = pos_of_offset (end_ - 1) end_ in
         let t = String.sub (Trivia.text t) 2 len in
         (p, CmtBlock t) :: cmts, fm
       | TriviaKind.SingleLineComment ->
@@ -2634,15 +2640,15 @@ type result =
   }
 
 let make_env
-  ?(hhvm_compat_mode         = false                   )
   ?(codegen                  = false                   )
+  ?(systemlib_compat_mode    = false                   )
   ?(php5_compat_mode         = false                   )
   ?(elaborate_namespaces     = true                    )
   ?(include_line_comments    = false                   )
   ?(keep_errors              = true                    )
   ?(ignore_pos               = false                   )
   ?(quick_mode               = false                   )
-  ?(lower_coroutines         = true                    )
+  ?(lower_coroutines         = false                   )
   ?(enable_hh_syntax         = false                   )
   ?(parser_options           = ParserOptions.default   )
   ?(fi_mode                  = FileInfo.Mpartial       )
@@ -2650,14 +2656,14 @@ let make_env
   ?stats
   (file : Relative_path.t)
   : env
-  = { hhvm_compat_mode
-    ; is_hh_file
-    ; codegen                 = codegen || hhvm_compat_mode
+  = { is_hh_file
+    ; codegen                 = codegen || systemlib_compat_mode
+    ; systemlib_compat_mode
     ; php5_compat_mode
     ; elaborate_namespaces
     ; include_line_comments
     ; keep_errors
-    ; quick_mode              = not hhvm_compat_mode && (match fi_mode with
+    ; quick_mode              = not codegen && (match fi_mode with
                                                         | FileInfo.Mdecl
                                                         | FileInfo.Mphp
                                                           -> true
@@ -2753,16 +2759,18 @@ let from_text (env : env) (source_text : SourceText.t) : result =
   let tree =
     let env =
       Full_fidelity_parser_env.make
-        ~hhvm_compat_mode:env.hhvm_compat_mode
+        ~hhvm_compat_mode:env.codegen
         ~php5_compat_mode:env.php5_compat_mode
         () in
     SyntaxTree.make ~env source_text in
-  let () = if env.hhvm_compat_mode then
+  let () = if env.codegen && not env.lower_coroutines then
+    let level = if env.systemlib_compat_mode then
+        ParserErrors.HHVMCompatibilitySystemLib
+      else ParserErrors.HHVMCompatibility
+    in
     let errors =
       ParserErrors.parse_errors
-        ~enable_hh_syntax:env.enable_hh_syntax
-        ~level:ParserErrors.HHVMCompatibility
-        tree
+        ~enable_hh_syntax:env.enable_hh_syntax ~level tree
     in
     (* Prioritize runtime errors *)
     let runtime_errors =
@@ -2789,7 +2797,7 @@ let from_text (env : env) (source_text : SourceText.t) : result =
       | _ -> None
     in
     Option.value_map mode_word ~default:FileInfo.Mpartial ~f:(function
-      | "decl" when env.hhvm_compat_mode -> FileInfo.Mphp
+      | "decl" when env.codegen -> FileInfo.Mphp
       | "decl"                           -> FileInfo.Mdecl
       | "strict"                         -> FileInfo.Mstrict
       | ("partial" | "")                 -> FileInfo.Mpartial

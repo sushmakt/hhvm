@@ -391,7 +391,8 @@ void ExternCompiler::writeProgram(
   folly::dynamic header = folly::dynamic::object
     ("type", "code")
     ("md5", md5.toString())
-    ("file", filename);
+    ("file", filename)
+    ("is_systemlib", !SystemLib::s_inited);
   writeMessage(header, code);
 }
 
@@ -531,10 +532,10 @@ void ExternCompiler::start() {
   }
 
   if (m_pid == kInvalidPid) {
-    throw BadCompilerException(
-      folly::to<std::string>(
-        "Unable to start external compiler with command: ",
-        m_options.command));
+    const auto msg = folly::to<std::string>(
+      "Unable to start external compiler with command: ", m_options.command);
+    Logger::Error(msg);
+    throw BadCompilerException(msg);
   }
 
   m_in = in.detach("w");
@@ -725,7 +726,7 @@ std::unique_ptr<UnitCompiler> UnitCompiler::create(const char* code,
                                                    const MD5& md5
 ) {
   s_manager.ensure_started();
-  if (SystemLib::s_inited) {
+  if (SystemLib::s_inited || RuntimeOption::EvalUseExternCompilerForSystemLib) {
     auto const hcMode = hackc_mode();
     if (hcMode != HackcMode::kNever && s_manager.hackc_enabled()) {
       return std::make_unique<HackcUnitCompiler>(

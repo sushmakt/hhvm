@@ -18,6 +18,11 @@ let init _ _ _ _ _ _ _ _ _ _ _ = ()
 let init_monitor _ _ _ = ()
 let init_end ~state_distance:_ ~approach_name:_ ~init_error:_ _ _ = ()
 let starting_first_server _ = ()
+let init_lazy_end
+  ~informant_use_xdb:_
+  ~state_distance:_
+  ~approach_name:_
+  ~init_error:_ _ = ()
 let init_really_end
   ~informant_use_xdb:_
   ~state_distance:_
@@ -69,10 +74,9 @@ let handle_persistent_connection_exception _ = ()
 let handled_command _ _ = ()
 let build_differs _ _ _ = ()
 let build_same _ _ = ()
-let recheck_end _ _ _ _ _ = ()
+let recheck_end _ _ _ _ = ()
 let indexing_end _ = ()
 let parsing_end _ _ ~parsed_count:_ = ()
-let parsing_hook_end _ = ()
 let updating_deps_end _ = ()
 let naming_end _ = ()
 let global_naming_end _ = ()
